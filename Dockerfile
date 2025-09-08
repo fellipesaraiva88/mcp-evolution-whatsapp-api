@@ -3,30 +3,32 @@ FROM oven/bun:1.0.29 as builder
 
 WORKDIR /app
 
+# Copy package files
 COPY package.json bun.lockb ./
-RUN bun install --frozen-lockfile
+RUN bun install
 
+# Copy source code
 COPY . .
 
-RUN bun run build
+# Build both MCP server and HTTP server
+RUN bun run build && bun run build:server
 
 # Production Stage
 FROM oven/bun:1.0.29-slim
 
 WORKDIR /app
 
-# Copy built files
+# Copy built files and dependencies
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package.json ./
-COPY --from=builder /app/bun.lockb ./
+COPY --from=builder /app/node_modules ./node_modules
 
-# If needed, copy env or config files
-# COPY --from=builder /app/.env ./
+# Expose port for HTTP server
+EXPOSE 3000
 
-RUN bun install --production --frozen-lockfile
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:3000/health || exit 1
 
-# Optional: Copy node_modules if Bun has issues
-# COPY --from=builder /app/node_modules ./node_modules
-# COPY --from=builder /app/.bun ./.bun
-
-CMD ["bun", "run", "dist/main.js"]
+# Start HTTP server by default
+CMD ["bun", "run", "dist/server.js"]

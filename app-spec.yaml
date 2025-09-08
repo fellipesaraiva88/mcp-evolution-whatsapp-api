@@ -1,0 +1,20 @@
+name: mcp-evolution-api
+region: nyc
+services:
+- name: mcp-evolution-api-service
+  source_dir: /
+  github:
+    repo: saraiva-ai/mcp-evolution-whatsapp-api
+    branch: main
+  build_command: bun install && bun run build && bun run build:server
+  run_command: node dist/server.js
+  http_port: 3000
+  instance_count: 1
+  instance_size_slug: basic-xxs
+  routes:
+  - path: /
+  envs:
+  - key: EVOLUTION_API_URL
+    value: "https://whats.saraiva.ai"
+  - key: EVOLUTION_API_KEY
+    value: "429683C4C977415CAAFCCE10F7D57E11"
