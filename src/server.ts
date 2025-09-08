@@ -46,11 +46,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name: toolName, arguments: args } = request.params;
+    const { name, arguments: args } = request.params;
     
-    const tool = tools.find((t) => t.name === toolName);
+    const tool = tools.find(t => t.name === name);
     if (!tool) {
-        throw new Error(`Unknown tool: ${toolName}`);
+        throw new Error(`Tool ${name} not found`);
     }
     
     try {
@@ -70,15 +70,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'ok', 
+    res.json({
+        status: 'ok',
         service: 'Evolution API MCP Server',
         version: '0.1.0',
         timestamp: new Date().toISOString()
     });
 });
 
-// List tools endpoint
+// List available tools
 app.get('/tools', async (req, res) => {
     try {
         const toolsList = tools.map(({ handler, ...tool }) => ({
@@ -86,8 +86,7 @@ app.get('/tools', async (req, res) => {
             description: tool.description,
             inputSchema: tool.inputSchema,
         }));
-        
-        res.json({ tools: toolsList });
+        res.json(toolsList);
     } catch (error) {
         res.status(500).json({ 
             error: 'Failed to list tools',
@@ -96,51 +95,37 @@ app.get('/tools', async (req, res) => {
     }
 });
 
-// Execute tool endpoint
+// Execute a specific tool
 app.post('/tools/:toolName', async (req, res) => {
     try {
         const { toolName } = req.params;
-        const args = req.body;
-
-        const tool = tools.find((t) => t.name === toolName);
-
+        const args = req.body || {};
+        
+        const tool = tools.find(t => t.name === toolName);
         if (!tool) {
             return res.status(404).json({ 
-                error: `Unknown tool: ${toolName}`,
-                availableTools: tools.map(t => t.name)
+                error: 'Tool not found',
+                available_tools: tools.map(t => t.name)
             });
         }
-
-        // Execute tool handler
-        try {
-            const result = await tool.handler(args);
-            res.json(result);
-        } catch (error) {
-            // Handle authentication errors
-            if (error instanceof Error && 
-               (error.message.includes('EVOLUTION_API_KEY') || 
-                error.message.includes('EVOLUTION_API_URL'))) {
-                return res.status(401).json({
-                    error: 'Authentication required',
-                    message: 'Please provide your Evolution API credentials in the configuration settings.'
-                });
-            }
-            
-            // Handle other errors
-            res.status(500).json({
-                error: 'Tool execution failed',
-                message: error instanceof Error ? error.message : String(error)
-            });
-        }
+        
+        const result = await tool.handler(args);
+        res.json({
+            tool: toolName,
+            result: result,
+            timestamp: new Date().toISOString()
+        });
     } catch (error) {
-        res.status(500).json({
-            error: 'Internal server error',
-            message: error instanceof Error ? error.message : String(error)
+        console.error(`Tool execution error:`, error);
+        res.status(500).json({ 
+            error: 'Tool execution failed',
+            message: error instanceof Error ? error.message : String(error),
+            timestamp: new Date().toISOString()
         });
     }
 });
 
-// Create WebSocket Server for MCP
+// WebSocket MCP Server
 const wss = new WebSocketServer({ 
     server: httpServer,
     path: '/mcp'
@@ -149,37 +134,25 @@ const wss = new WebSocketServer({
 wss.on('connection', (ws) => {
     console.log('🔌 New MCP WebSocket connection established');
     
-    // Create WebSocket transport for MCP
-    const transport = {
-        start: async () => {
-            console.log('🚀 MCP WebSocket transport started');
-        },
-        close: async () => {
-            console.log('🔌 MCP WebSocket transport closed');
-            ws.close();
-        },
-        send: async (message: any) => {
-            if (ws.readyState === ws.OPEN) {
-                ws.send(JSON.stringify(message));
-            }
-        }
-    };
+    let initialized = false;
     
-    // Handle incoming WebSocket messages
     ws.on('message', async (data) => {
         try {
             const message = JSON.parse(data.toString());
-            console.log('📨 Received MCP message:', message.method || 'unknown');
+            console.log('📨 Received MCP message:', message);
             
             // Handle MCP protocol messages
             if (message.method === 'initialize') {
+                initialized = true;
                 const response = {
                     jsonrpc: '2.0',
                     id: message.id,
                     result: {
                         protocolVersion: '2024-11-05',
                         capabilities: {
-                            tools: {}
+                            tools: {
+                                listChanged: false
+                            }
                         },
                         serverInfo: {
                             name: 'Evolution API MCP Server',
@@ -188,7 +161,24 @@ wss.on('connection', (ws) => {
                     }
                 };
                 ws.send(JSON.stringify(response));
-            } else if (message.method === 'tools/list') {
+                console.log('✅ MCP initialization complete');
+                return;
+            }
+            
+            if (!initialized) {
+                const errorResponse = {
+                    jsonrpc: '2.0',
+                    id: message.id,
+                    error: {
+                        code: -32002,
+                        message: 'Server not initialized. Send initialize request first.'
+                    }
+                };
+                ws.send(JSON.stringify(errorResponse));
+                return;
+            }
+            
+            if (message.method === 'tools/list') {
                 const response = {
                     jsonrpc: '2.0',
                     id: message.id,
@@ -201,17 +191,21 @@ wss.on('connection', (ws) => {
                     }
                 };
                 ws.send(JSON.stringify(response));
-            } else if (message.method === 'tools/call') {
-                const { name: toolName, arguments: args } = message.params;
+                console.log(`📋 Sent ${tools.length} tools to client`);
+                return;
+            }
+            
+            if (message.method === 'tools/call') {
+                const { name, arguments: args } = message.params;
                 
-                const tool = tools.find((t) => t.name === toolName);
+                const tool = tools.find(t => t.name === name);
                 if (!tool) {
                     const errorResponse = {
                         jsonrpc: '2.0',
                         id: message.id,
                         error: {
                             code: -32601,
-                            message: `Unknown tool: ${toolName}`
+                            message: `Tool ${name} not found`
                         }
                     };
                     ws.send(JSON.stringify(errorResponse));
@@ -233,6 +227,7 @@ wss.on('connection', (ws) => {
                         }
                     };
                     ws.send(JSON.stringify(response));
+                    console.log(`⚡ Executed tool: ${name}`);
                 } catch (error) {
                     const errorResponse = {
                         jsonrpc: '2.0',
@@ -243,10 +238,33 @@ wss.on('connection', (ws) => {
                         }
                     };
                     ws.send(JSON.stringify(errorResponse));
+                    console.error(`❌ Tool execution error:`, error);
                 }
+                return;
             }
+            
+            // Unknown method
+            const errorResponse = {
+                jsonrpc: '2.0',
+                id: message.id,
+                error: {
+                    code: -32601,
+                    message: `Method not found: ${message.method}`
+                }
+            };
+            ws.send(JSON.stringify(errorResponse));
+            
         } catch (error) {
-            console.error('❌ Error processing WebSocket message:', error);
+            console.error('❌ WebSocket message processing error:', error);
+            const errorResponse = {
+                jsonrpc: '2.0',
+                id: null,
+                error: {
+                    code: -32700,
+                    message: 'Parse error'
+                }
+            };
+            ws.send(JSON.stringify(errorResponse));
         }
     });
     
@@ -259,38 +277,42 @@ wss.on('connection', (ws) => {
     });
 });
 
-// MCP WebSocket info endpoint
+// MCP endpoint info
 app.get('/mcp', (req, res) => {
-    res.json({ 
-        message: 'MCP WebSocket endpoint available',
-        websocket_url: `ws://localhost:${port}/mcp`,
-        available_endpoints: {
+    res.json({
+        message: 'MCP WebSocket server is available',
+        websocket_url: `ws://${req.get('host')}/mcp`,
+        protocol: 'Model Context Protocol (MCP)',
+        version: '2024-11-05',
+        endpoints: {
             health: '/health',
             tools: '/tools',
-            execute: '/tools/:toolName',
-            websocket: '/mcp (WebSocket)'
+            execute_tool: '/tools/:toolName'
+        },
+        instructions: {
+            connect: 'Connect to the WebSocket URL above',
+            initialize: 'Send an initialize message first',
+            list_tools: 'Use tools/list method',
+            call_tool: 'Use tools/call method with tool name and arguments'
         }
     });
 });
 
 // Error handling middleware
 app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    console.error('Server error:', err);
-    res.status(500).json({
+    console.error('❌ Server error:', err);
+    res.status(500).json({ 
         error: 'Internal server error',
-        message: err.message
+        message: err.message 
     });
 });
 
 // 404 handler
 app.use((req, res) => {
-    res.status(404).json({
-        error: 'Endpoint not found',
-        available_endpoints: {
-            health: 'GET /health',
-            tools: 'GET /tools', 
-            execute: 'POST /tools/:toolName'
-        }
+    res.status(404).json({ 
+        error: 'Not found',
+        available_endpoints: ['/health', '/tools', '/tools/:toolName', '/mcp'],
+        message: `Endpoint ${req.path} not found`
     });
 });
 

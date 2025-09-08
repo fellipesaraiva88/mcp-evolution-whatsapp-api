@@ -1,6 +1,5 @@
 # Build Stage
 FROM oven/bun:1.0.29 as builder
-
 WORKDIR /app
 
 # Copy package files
@@ -15,7 +14,6 @@ RUN bun run build && bun run build:server
 
 # Production Stage
 FROM oven/bun:1.0.29-slim
-
 WORKDIR /app
 
 # Copy built files and dependencies
